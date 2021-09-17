@@ -139,6 +139,27 @@ Failing to do so will lead into hard to maintain code, which is not our goal!
 
 <b>"With great power, comes great responsibility"</b>
 
+## PipeFunc
+
+This function is used to create pipeline steps. It's signature is very simple:
+
+``` go
+ func(ctx context.Context, name string, input PipelineData) (output PipelineData, err error)
+```
+
+Basically, it transforms the PipelineData in some way. </br>
+The name parameter is used for metrics, and helping troubleshoot errors, so it's good to give a name that makes send.
+
+One example of a step using a receiver of a struct that has some dependencies injected on it:
+
+``` go
+ func (p pipelineProcessor) GetFromDatabasePipelineFunc (ctx context.Context, name string, input PipelineData) (output PipelineData, err error) {
+ 
+```
+
+![Pipefunc example](docs/resources/pipefunc.png)
+
+
 ## OrDone
 
 Using the OrDone func ensures that the goroutine will exit as soon as the context in cancelled, which is very important

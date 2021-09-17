@@ -2,6 +2,7 @@ package channels
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
@@ -28,6 +29,38 @@ func NewPipelineErr(step string, err error) error {
 }
 
 type PipelineStepFunc func(ctx context.Context, name string, input PipelineData) (output PipelineData, err error)
+
+type pipelineProcessor struct {
+	database Database
+}
+
+type Database interface {
+	Get(string) (interface{}, error)
+}
+
+type PipelineEntity struct {
+	ID     string
+	Result interface{}
+}
+
+func (p pipelineProcessor) GetFromDatabasePipelineFunc(ctx context.Context, name string, input PipelineData) (output PipelineData, err error) {
+	inputEntity, ok := input.Value.(PipelineEntity)
+	if !ok {
+		return PipelineData{}, errors.New("unknown value in input")
+	}
+
+	r, err := p.database.Get(inputEntity.ID)
+	if err != nil {
+		return PipelineData{}, err
+	}
+
+	return PipelineData{
+		Ctx:   ctx,
+		Value: r,
+		Err:   nil,
+	}, nil
+
+}
 
 // GeneratorFromSlice creates a generator from an inputSlice
 func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) <-chan PipelineData {

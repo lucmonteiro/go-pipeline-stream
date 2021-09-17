@@ -5,6 +5,11 @@ import (
 	"sync"
 )
 
+type PipelineErr struct {
+	error
+	Step string
+}
+
 // PipelineData is the struct we transit between our pipelineSteps.
 // Ctx can be the context of the whole execution, or a ctx specific to this line (ex: ctx with lock tokens)
 // Err should be checked in all steps, and if present, step should not do anything, just foward the error
@@ -15,11 +20,14 @@ type PipelineData struct {
 	Err   error
 }
 
-func NewPipelineErr(err error) PipelineData {
-	return PipelineData{Err: err}
+func NewPipelineErr(step string, err error) error {
+	return PipelineErr{
+		error: err,
+		Step:  step,
+	}
 }
 
-type PipelineStepFunc func(ctx context.Context, input PipelineData) (output PipelineData, err error)
+type PipelineStepFunc func(ctx context.Context, name string, input PipelineData) (output PipelineData, err error)
 
 // GeneratorFromSlice creates a generator from an inputSlice
 func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) <-chan PipelineData {
@@ -40,8 +48,9 @@ func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) <-chan P
 }
 
 // CreatePipelineStep is a wrapper func for simple pipeline steps.
-// It will generate a stream with the output of the createStepFunc, using the inputStream as input
+// It will generate a stream with the output of the createStepFunc, using the inputStream as input.
 func CreatePipelineStep(ctx context.Context,
+	name string,
 	inputStream <-chan PipelineData,
 	createStepFunc PipelineStepFunc) <-chan PipelineData {
 
@@ -52,18 +61,31 @@ func CreatePipelineStep(ctx context.Context,
 			// if err is not nil, we should do anything with this register, just forward it
 			if i.Err != nil {
 				WriteOrDone(ctx, i, outputStream)
+				continue
 			}
 
-			output, err := createStepFunc(ctx, i)
+			output, err := createStepFunc(ctx, name, i)
 			if err != nil {
-				WriteOrDone(ctx, NewPipelineErr(err), outputStream)
+				WriteOrDone(ctx, PipelineData{Err: NewPipelineErr(name, err)}, outputStream)
+				continue
 			}
 
 			WriteOrDone(ctx, output, outputStream)
+
 		}
 	}()
 
 	return outputStream
+}
+
+// FanOut will generate an array of of streams given an input stream, processed by the pipeFunc
+// Use FanIn after using this function in order to join the resulting streams into another stream.
+func FanOut(ctx context.Context, inputStream <-chan PipelineData, pipeFunc PipelineStepFunc, fanAmount int) []<-chan PipelineData {
+	finders := make([]<-chan PipelineData, fanAmount)
+	for i := 0; i < fanAmount; i++ {
+		finders[i] = CreatePipelineStep(ctx, "fanout", inputStream, pipeFunc)
+	}
+	return finders
 }
 
 // FanIn will join a variadic quantity of channels into a single channel
@@ -98,6 +120,7 @@ func FanIn(ctx context.Context, channels ...<-chan PipelineData) <-chan Pipeline
 func WriteOrDone(ctx context.Context, write PipelineData, to chan<- PipelineData) {
 	select {
 	case <-ctx.Done():
+		return
 	case to <- write:
 	}
 }

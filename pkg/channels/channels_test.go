@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -150,8 +151,11 @@ func TestOrDone_CancelContext(t *testing.T) {
 		}
 	}()
 
-	done := OrDone(ctx, infiniteChannel)
-	require.Empty(t, <-done)
+	for result := range OrDone(ctx, infiniteChannel) {
+		// do something with stream result here
+		fmt.Println(result.Value)
+	}
+
 }
 
 func TestOrDone_ClosedChannel(t *testing.T) {

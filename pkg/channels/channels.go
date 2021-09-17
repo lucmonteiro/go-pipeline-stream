@@ -93,22 +93,23 @@ func FanOut(ctx context.Context, inputStream <-chan PipelineData, pipeFunc Pipel
 // DO NOT use if the channels does not contain the same input, as it will lead to a output channel
 // of different types.
 func FanIn(ctx context.Context, channels ...<-chan PipelineData) <-chan PipelineData {
-	wg := sync.WaitGroup{}
-
+	wg := sync.WaitGroup{} // used to know we processed all channels
 	multiplexedStream := make(chan PipelineData)
+
+	// create a func to write to the outputStream given the input channels
 	multiplex := func(c <-chan PipelineData) {
-		defer wg.Done()
-		for element := range OrDone(ctx, c) {
-			multiplexedStream <- element
+		defer wg.Done()                       // tells wait group this channel is done
+		for element := range OrDone(ctx, c) { //Range through input channel
+			multiplexedStream <- element // write to output stream
 		}
 	}
 
-	wg.Add(len(channels))
+	wg.Add(len(channels)) // tells wait group it has to wait for N channels
 	for _, c := range channels {
-		go multiplex(c)
+		go multiplex(c) // start writing to the multiplexedStream
 	}
 
-	go func() {
+	go func() { // start a async func that will close the multiplexedStream as soon as all channels are done reading from (or cancelled ctx)
 		wg.Wait()
 		close(multiplexedStream)
 	}()
@@ -127,25 +128,25 @@ func WriteOrDone(ctx context.Context, write PipelineData, to chan<- PipelineData
 
 // OrDone will read encapsulate the logic of listening to the context's done or the input channel close
 // It's useful to ensure goroutines will not be leaked and keep the code idiomatic.
-func OrDone(ctx context.Context, c <-chan PipelineData) <-chan PipelineData {
-	valStream := make(chan PipelineData)
+func OrDone(ctx context.Context, inputStream <-chan PipelineData) <-chan PipelineData {
+	outputStream := make(chan PipelineData)
 	go func() {
-		defer close(valStream)
+		defer close(outputStream)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-ctx.Done(): // exit as soon as the context is done
 				return
-			case v, ok := <-c:
-				if ok == false {
+			case v, ok := <-inputStream:
+				if ok == false { // ok == false means the input channel was closed
 					return
 				}
 				select {
-				case valStream <- v:
-				case <-ctx.Done():
+				case outputStream <- v: // write to value stream
+				case <-ctx.Done(): //or exit if context is done and no one is reading from outputStream (routine stuck in the write))
 				}
 			}
 		}
 	}()
 
-	return valStream
+	return outputStream
 }

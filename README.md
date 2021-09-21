@@ -13,8 +13,8 @@ channels.
 
 ## High Level Design
 
-In order to achieve increased performance, use the FanIn/FanOut technique: spawn multiple goroutines for a given step,
-and then unite them back into a single channel.
+To achieve increased performance, we will use the FanIn/FanOut technique: spawn multiple goroutines for a given step,
+and then unite them back into a single channel (some would call this a map reduce).
 
 ### Example:
 
@@ -139,26 +139,28 @@ Failing to do so will lead into hard to maintain code, which is not our goal!
 
 <b>"With great power, comes great responsibility"</b>
 
+We suggest that you create a specific type for each Pipeline, containing relevant information for the execution at hand.
+
 ## PipeFunc
 
 This function is used to create pipeline steps. It's signature is very simple:
 
 ``` go
- func(ctx context.Context, name string, input PipelineData) (output PipelineData, err error)
+ // PipelineStepFunc is the func that we will use in our steps to transform data
+	PipelineStepFunc func(ctx context.Context, name string, input PipelineData) (output PipelineData, err error)
 ```
 
 Basically, it transforms the PipelineData in some way. </br>
-The name parameter is used for metrics, and helping troubleshoot errors, so it's good to give a name that makes send.
+The name parameter is used for metrics, and helping troubleshoot for errors, so it's good to give a name that makes
+sense.
 
-One example of a step using a receiver of a struct that has some dependencies injected on it:
+Here's one example of a step using a receiver of a struct that has some dependencies injected on it:
 
 ``` go
  func (p pipelineProcessor) GetFromDatabasePipelineFunc (ctx context.Context, name string, input PipelineData) (output PipelineData, err error) {
- 
 ```
 
 ![Pipefunc example](docs/resources/pipefunc.png)
-
 
 ## OrDone
 
@@ -171,20 +173,23 @@ working with channels:
 - Context is cancelled
 - The inputStream that we are reading from is closed and no more elements are available
 
-Using the OrDone func helps checking this, while keeping the code clean:
+Using the OrDone func helps checking this, while keeping the code clean.
 
-![OrDone func](docs/resources/ordone.png)
-
-Usage:
-
-![OrDone usage](docs/resources/ordone_usage.png)
+``` go
+    for element := range OrDone(ctx, inputStream) { //Range through input channel
+        outputStream <- element // write to output stream
+    }
+```
 
 ## Generator
 
-Generator will send input data to a channel, in order to provide the input as a stream. It's usually the first step of a
-pipeline, the one that will provide input to other steps.
+Generator will send input data to a channel, in order to provide the input as a stream. </br>
+It's usually the first step of a pipeline, the one that will provide input to other steps.
 
-![Generator](docs/resources/generator.png)
+There is one simple Generator func in our repository in order to serve as a guideline for other developers. It's
+important to close the stream whenever the loop is done generating elements (example: EOF), and to write using the
+WriteOrDone function in order to avoid go routine leaks (one routine is trying to write, but no one is listening to and
+context is cancelled).
 
 ## FanOut
 
@@ -195,34 +200,48 @@ other (ex: entry 4 can not influence in any way entry 5, as they WILL be runned 
 
 If order IS important, FanOut should NOT be used - although using a pipeline stream can still be used with one goroutine
 for each step, as order will be maintained: the input stream will make the data available in the order it receives.
-
-The gain from doing so is noticeable (specially if the steps are designed correctly), but it's lesser than a fanned out
-pipeline.
-
-![FanOut code](docs/resources/fanout.png)
-
-FanOut example usage, AuthorizePipeFunc will generate authorization transactions using the generator stream as input:
-
-![FanOut usage](docs/resources/fanout_usage.png)
+There is another pattern called bridge channel (which we didn't implement yet) that can help with preserving the order.
 
 ## FanIn
 
 FanIn will read from a variadic slice of channels and join them into a single output channel. It will use a waitgroup to
 ensure that all channels were read from, and close the multiplexedStream afterwards.
 
-![FanIn code](docs/resources/fanin.png)
-
 FanIn will join the resulting channels of FanOut into a single channel:
 
-![FanIn usage](docs/resources/fanin_usage.png)
+``` go 
 
-In the example above we joined the streams into one only to fan out again, this is ok because we might want lesser routines for different activites. </br>
-Also, we did a benchmark comparison of processing the FannedOut routines into a ManyToMany algorithm, and it proved faster to FanIn then FanOut again.
+generatorStream := func() <-chan PipelineData {
+    inputStream := make(chan PipelineData, 200)
+
+    go func() {
+        defer close(inputStream)
+        for i := 0; i < 10000; i++ {
+            data := generateStressTestInput(ctx, tk)
+            inputStream <- data
+        }
+
+        fmt.Println("finished generating tokens")
+    }()
+
+    return inputStream
+}()
+
+authorizeFannedOutStreams := FanOut(ctx, generatorStream, AuthorizePipeFunc)
+authorizeStream := FanIn(ctx, authorizeFannedOutStreams...)
+captureStreams := FanOut(ctx, authorizeStream, CapturePipelineFunc)
+
+result := FanIn(ctx, captureStreams...)
+```
+
+In the example above we joined the streams into one only to fan out again, this is ok because we might want lesser
+routines for different activites. </br>
+Also, we did a benchmark comparison of processing the FannedOut routines into a ManyToMany algorithm, and it proved
+faster to FanIn then FanOut again.
 
 The example is a stress test we did for an authorization system:
+
 - Generates an input of transactions
 - Send authorization request to authorizer, forwards result to stream
 - From the authorization result, send a capture request
 - Joins the channels into a result channel and listen to them
-
-This kept the tps at around 90 tps, because of limitations of the local machine. 

@@ -2,25 +2,39 @@ package channels
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"sync"
 )
 
-type PipelineErr struct {
-	error
-	Step string
-}
+// PipelineErr custom err to carry the step where the error occurred name
+type (
+	PipelineErr struct {
+		error
+		Step string
+	}
 
-// PipelineData is the struct we transit between our pipelineSteps.
-// Ctx can be the context of the whole execution, or a ctx specific to this line (ex: ctx with lock tokens)
-// Err should be checked in all steps, and if present, step should not do anything, just foward the error
-// This patterns makes our error handling easier, caring about it only in the final steps of the pipeline
-type PipelineData struct {
-	Ctx   context.Context
-	Value interface{}
-	Err   error
-}
+	// PipelineData is the struct we transit between our pipelineSteps.
+	// Ctx can be the context of the whole execution, or a ctx specific to this line (ex: ctx with lock tokens)
+	// Err should be checked in all steps, and if present, step should not do anything, just forward the error
+	// This patterns makes our error handling easier, caring about it only in the final steps of the pipeline
+	PipelineData struct {
+		Ctx   context.Context
+		Value interface{}
+		Err   error
+	}
 
+	// PipelineStepFunc is the func that we will use in our steps to transform data
+	PipelineStepFunc func(ctx context.Context, name string, input PipelineData) (output PipelineData, err error)
+
+	// CreateStepRequest Wrapper struct to create pipeline steps
+	CreateStepRequest struct {
+		Name        string              // Name is the name of given step
+		Func        PipelineStepFunc    // Func is the func that this step will execute
+		InputStream <-chan PipelineData // InputStream is the stream that a step will receive data from
+	}
+)
+
+// NewPipelineErr wrapper for generating a pipeline error
 func NewPipelineErr(step string, err error) error {
 	return PipelineErr{
 		error: err,
@@ -28,38 +42,13 @@ func NewPipelineErr(step string, err error) error {
 	}
 }
 
-type PipelineStepFunc func(ctx context.Context, name string, input PipelineData) (output PipelineData, err error)
-
-type pipelineProcessor struct {
-	database Database
-}
-
-type Database interface {
-	Get(string) (interface{}, error)
-}
-
-type PipelineEntity struct {
-	ID     string
-	Result interface{}
-}
-
-func (p pipelineProcessor) GetFromDatabasePipelineFunc(ctx context.Context, name string, input PipelineData) (output PipelineData, err error) {
-	inputEntity, ok := input.Value.(PipelineEntity)
-	if !ok {
-		return PipelineData{}, errors.New("unknown value in input")
+// NewCreateStepRequest helper function to instantiate CreateStepRequest
+func NewCreateStepRequest(name string, inputStream <-chan PipelineData, stepFunc PipelineStepFunc) CreateStepRequest {
+	return CreateStepRequest{
+		Name:        name,
+		Func:        stepFunc,
+		InputStream: inputStream,
 	}
-
-	r, err := p.database.Get(inputEntity.ID)
-	if err != nil {
-		return PipelineData{}, err
-	}
-
-	return PipelineData{
-		Ctx:   ctx,
-		Value: r,
-		Err:   nil,
-	}, nil
-
 }
 
 // GeneratorFromSlice creates a generator from an inputSlice
@@ -82,24 +71,20 @@ func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) <-chan P
 
 // CreatePipelineStep is a wrapper func for simple pipeline steps.
 // It will generate a stream with the output of the createStepFunc, using the inputStream as input.
-func CreatePipelineStep(ctx context.Context,
-	name string,
-	inputStream <-chan PipelineData,
-	createStepFunc PipelineStepFunc) <-chan PipelineData {
-
+func CreatePipelineStep(ctx context.Context, request CreateStepRequest) <-chan PipelineData {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)
-		for i := range OrDone(ctx, inputStream) {
+		for i := range OrDone(ctx, request.InputStream) {
 			// if err is not nil, we should do anything with this register, just forward it
 			if i.Err != nil {
 				WriteOrDone(ctx, i, outputStream)
 				continue
 			}
 
-			output, err := createStepFunc(ctx, name, i)
+			output, err := request.Func(ctx, request.Name, i)
 			if err != nil {
-				WriteOrDone(ctx, PipelineData{Err: NewPipelineErr(name, err)}, outputStream)
+				WriteOrDone(ctx, PipelineData{Err: NewPipelineErr(request.Name, err)}, outputStream)
 				continue
 			}
 
@@ -113,23 +98,22 @@ func CreatePipelineStep(ctx context.Context,
 
 // FanOut will generate an array of of streams given an input stream, processed by the pipeFunc
 // Use FanIn after using this function in order to join the resulting streams into another stream.
-func FanOut(ctx context.Context, inputStream <-chan PipelineData, pipeFunc PipelineStepFunc, fanAmount int) []<-chan PipelineData {
+func FanOut(ctx context.Context, fanAmount int, request CreateStepRequest) []<-chan PipelineData {
 	finders := make([]<-chan PipelineData, fanAmount)
 	for i := 0; i < fanAmount; i++ {
-		finders[i] = CreatePipelineStep(ctx, "fanout", inputStream, pipeFunc)
+		request.Name = fmt.Sprintf("%s#%d", request.Name, i)
+		finders[i] = CreatePipelineStep(ctx, request)
 	}
 	return finders
 }
 
 // FanIn will join a variadic quantity of channels into a single channel
-// It's useful after using the fan out pattern to spawn multiple goroutines to process the same input
-// DO NOT use if the channels does not contain the same input, as it will lead to a output channel
-// of different types.
+// It's useful after using the fan out pattern to spawn multiple goroutines to process the same input .
 func FanIn(ctx context.Context, channels ...<-chan PipelineData) <-chan PipelineData {
 	wg := sync.WaitGroup{} // used to know we processed all channels
 	multiplexedStream := make(chan PipelineData)
 
-	// create a func to write to the outputStream given the input channels
+	// create a func to write to the OutputStream given the input channels
 	multiplex := func(c <-chan PipelineData) {
 		defer wg.Done()                       // tells wait group this channel is done
 		for element := range OrDone(ctx, c) { //Range through input channel
@@ -154,7 +138,6 @@ func FanIn(ctx context.Context, channels ...<-chan PipelineData) <-chan Pipeline
 func WriteOrDone(ctx context.Context, write PipelineData, to chan<- PipelineData) {
 	select {
 	case <-ctx.Done():
-		return
 	case to <- write:
 	}
 }
@@ -175,7 +158,7 @@ func OrDone(ctx context.Context, inputStream <-chan PipelineData) <-chan Pipelin
 				}
 				select {
 				case outputStream <- v: // write to value stream
-				case <-ctx.Done(): //or exit if context is done and no one is reading from outputStream (routine stuck in the write))
+				case <-ctx.Done(): //or exit if context is done and no one is reading from OutputStream (routine stuck in the write))
 				}
 			}
 		}

@@ -124,7 +124,7 @@ communicate between goroutines - it's a safer approach. </br>
 If the need arises (for example, for holding a cache of processed ids to avoid duplications), always use the sync
 package to control the access to these variables.
 
-# Reusable functions
+# Channels package
 
 It is important to notice that in order to make these functions reusable, we declared the type of the channels as <-
 chan PipelineData. </br>
@@ -191,6 +191,26 @@ important to close the stream whenever the loop is done generating elements (exa
 WriteOrDone function in order to avoid go routine leaks (one routine is trying to write, but no one is listening to and
 context is cancelled).
 
+``` go
+// GeneratorFromSlice creates a generator from an inputSlice
+func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) <-chan PipelineData {
+	outputStream := make(chan PipelineData)
+	go func() {
+		defer close(outputStream)
+
+		for _, v := range inputSlice {
+			data := PipelineData{
+				Ctx:   ctx,
+				Value: v,
+			}
+
+			WriteOrDone(ctx, data, outputStream)
+		}
+	}()
+	return outputStream
+}
+```
+
 ## FanOut
 
 FanOut will generate a pipeline step that spawns N goroutines using a streamFunc to create the channels.
@@ -245,3 +265,8 @@ The example is a stress test we did for an authorization system:
 - Send authorization request to authorizer, forwards result to stream
 - From the authorization result, send a capture request
 - Joins the channels into a result channel and listen to them
+
+# Final thoughts
+
+These examples should be enough to get you going with a Pipeline Stream. </br>
+In the next version we will add heartbeat support, in order to monitor each function to identify misbehaving goroutines.

@@ -24,14 +24,16 @@ type (
 	}
 
 	// PipelineStepFunc is the func that we will use in our steps to transform data
-	PipelineStepFunc func(ctx context.Context, name string, input PipelineData) (output PipelineData, err error)
+	PipelineStepFunc func(ctx context.Context, input PipelineData) (output PipelineData, err error)
 
 	// CreateStepRequest Wrapper struct to create pipeline steps
 	CreateStepRequest struct {
-		Name        string              // Name is the name of given step
-		Func        PipelineStepFunc    // Func is the func that this step will execute
-		InputStream <-chan PipelineData // InputStream is the stream that a step will receive data from
+		Name        string           // Name is the name of given step
+		Func        PipelineStepFunc // Func is the func that this step will execute
+		InputStream Stream           // InputStream is the stream that a step will receive data from
 	}
+
+	Stream <-chan PipelineData
 )
 
 // NewPipelineErr wrapper for generating a pipeline error
@@ -52,7 +54,7 @@ func NewCreateStepRequest(name string, inputStream <-chan PipelineData, stepFunc
 }
 
 // GeneratorFromSlice creates a generator from an inputSlice
-func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) <-chan PipelineData {
+func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) Stream {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)
@@ -71,7 +73,7 @@ func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) <-chan P
 
 // CreatePipelineStep is a wrapper func for simple pipeline steps.
 // It will generate a stream with the output of the createStepFunc, using the inputStream as input.
-func CreatePipelineStep(ctx context.Context, request CreateStepRequest) <-chan PipelineData {
+func CreatePipelineStep(ctx context.Context, request CreateStepRequest) Stream {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)
@@ -82,7 +84,7 @@ func CreatePipelineStep(ctx context.Context, request CreateStepRequest) <-chan P
 				continue
 			}
 
-			output, err := request.Func(ctx, request.Name, i)
+			output, err := request.Func(ctx, i)
 			if err != nil {
 				WriteOrDone(ctx, PipelineData{Err: NewPipelineErr(request.Name, err)}, outputStream)
 				continue
@@ -98,8 +100,8 @@ func CreatePipelineStep(ctx context.Context, request CreateStepRequest) <-chan P
 
 // FanOut will generate an array of of streams given an input stream, processed by the pipeFunc
 // Use FanIn after using this function in order to join the resulting streams into another stream.
-func FanOut(ctx context.Context, fanAmount int, request CreateStepRequest) []<-chan PipelineData {
-	finders := make([]<-chan PipelineData, fanAmount)
+func FanOut(ctx context.Context, fanAmount int, request CreateStepRequest) []Stream {
+	finders := make([]Stream, fanAmount)
 	for i := 0; i < fanAmount; i++ {
 		request.Name = fmt.Sprintf("%s#%d", request.Name, i)
 		finders[i] = CreatePipelineStep(ctx, request)
@@ -109,12 +111,12 @@ func FanOut(ctx context.Context, fanAmount int, request CreateStepRequest) []<-c
 
 // FanIn will join a variadic quantity of channels into a single channel
 // It's useful after using the fan out pattern to spawn multiple goroutines to process the same input .
-func FanIn(ctx context.Context, channels ...<-chan PipelineData) <-chan PipelineData {
+func FanIn(ctx context.Context, channels ...Stream) Stream {
 	wg := sync.WaitGroup{} // used to know we processed all channels
 	multiplexedStream := make(chan PipelineData)
 
 	// create a func to write to the OutputStream given the input channels
-	multiplex := func(c <-chan PipelineData) {
+	multiplex := func(c Stream) {
 		defer wg.Done()                       // tells wait group this channel is done
 		for element := range OrDone(ctx, c) { //Range through input channel
 			multiplexedStream <- element // write to output stream
@@ -144,7 +146,7 @@ func WriteOrDone(ctx context.Context, write PipelineData, to chan<- PipelineData
 
 // OrDone will read encapsulate the logic of listening to the context's done or the input channel close
 // It's useful to ensure goroutines will not be leaked and keep the code idiomatic.
-func OrDone(ctx context.Context, inputStream <-chan PipelineData) <-chan PipelineData {
+func OrDone(ctx context.Context, inputStream <-chan PipelineData) Stream {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)

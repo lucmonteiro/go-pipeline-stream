@@ -3,8 +3,8 @@ package channels_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"go-pipeline-stream/pkg/channels"
+
 	"sort"
 	"testing"
 	"time"
@@ -13,24 +13,24 @@ import (
 )
 
 var (
-	slowFunc = func(ctx context.Context, name string, input channels.PipelineData) (output channels.PipelineData, err error) {
+	slowFunc = func(ctx context.Context, input channels.PipelineData) (output channels.PipelineData, err error) {
 		<-time.After(time.Second * 10)
 		return input, nil
 	}
 
-	addPipelineFunc = func(ctx context.Context, name string, input channels.PipelineData) (output channels.PipelineData, err error) {
+	addPipelineFunc = func(ctx context.Context, input channels.PipelineData) (output channels.PipelineData, err error) {
 		intAmount := input.Value.(int) + 1
 		output.Value = intAmount
 		return
 	}
 
-	multiplyPipelineFunc = func(ctx context.Context, name string, input channels.PipelineData) (output channels.PipelineData, err error) {
+	multiplyPipelineFunc = func(ctx context.Context, input channels.PipelineData) (output channels.PipelineData, err error) {
 		intAmount := input.Value.(int) * 2
 		output.Value = intAmount
 		return
 	}
 
-	errorPipelineFunc = func(ctx context.Context, name string, input channels.PipelineData) (channels.PipelineData, error) {
+	errorPipelineFunc = func(ctx context.Context, input channels.PipelineData) (channels.PipelineData, error) {
 		if input.Value.(int) == 10 {
 			return channels.PipelineData{}, errors.New("unexpected error")
 		}
@@ -115,7 +115,7 @@ func TestCreatePipelineStep_ErrorFirstStep(t *testing.T) {
 }
 
 func TestFanIn(t *testing.T) {
-	chans := make([]<-chan channels.PipelineData, 10)
+	chans := make([]channels.Stream, 10)
 
 	for i := 0; i < 10; i++ {
 		a := i
@@ -145,21 +145,17 @@ func TestFanIn(t *testing.T) {
 }
 
 func TestOrDone_CancelContext(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancel()
 
-	<-time.After(time.Millisecond * 10)
-
 	infiniteChannel := make(chan channels.PipelineData)
-	go func() {
-		for {
-			infiniteChannel <- channels.PipelineData{Value: 1}
-		}
-	}()
 
-	for result := range channels.OrDone(ctx, infiniteChannel) {
-		// do something with stream result here
-		fmt.Println(result.Value)
+	select {
+	case <-channels.OrDone(ctx, infiniteChannel):
+		// reaching this part of code means test passed
+		require.True(t, true)
+	case <-time.After(time.Second * 2):
+		require.Fail(t, "timeout by the test mechanism, which means our OrDone check didn't function properly")
 	}
 
 }

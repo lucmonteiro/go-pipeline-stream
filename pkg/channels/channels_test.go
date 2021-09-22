@@ -3,13 +3,11 @@ package channels_test
 import (
 	"context"
 	"errors"
+	"github.com/stretchr/testify/require"
 	"go-pipeline-stream/pkg/channels"
-
 	"sort"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -37,6 +35,14 @@ var (
 
 		return input, nil
 	}
+
+	handleErrFunc = func(ctx context.Context, input channels.PipelineData) (channels.PipelineData, error) {
+		if input.Err != nil {
+			return channels.PipelineData{Value: "error was handled gracefully"}, nil
+		}
+
+		return input, nil
+	}
 )
 
 func TestCreatePipelineStep_Success(t *testing.T) {
@@ -44,8 +50,8 @@ func TestCreatePipelineStep_Success(t *testing.T) {
 
 	ctx := context.Background()
 
-	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", inputStream, addPipelineFunc))
-	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", addedStream, multiplyPipelineFunc))
+	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
+	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", false, addedStream, multiplyPipelineFunc))
 
 	results := []interface{}{}
 	for i := range channels.OrDone(ctx, multipliedStream) {
@@ -69,9 +75,9 @@ func TestCreatePipelineStep_Error_LastStep(t *testing.T) {
 
 	ctx := context.Background()
 
-	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", inputStream, addPipelineFunc))
-	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", addedStream, multiplyPipelineFunc))
-	errorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("error", multipliedStream, errorPipelineFunc))
+	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
+	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	errorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("error", false, multipliedStream, errorPipelineFunc))
 
 	results := []interface{}{}
 	for i := range channels.OrDone(ctx, errorStream) {
@@ -83,7 +89,7 @@ func TestCreatePipelineStep_Error_LastStep(t *testing.T) {
 	}
 
 	expected := []interface{}{
-		4, 6, 8, channels.NewPipelineErr("error", errors.New("unexpected error")), 12, 14, 16, 18, 20,
+		4, 6, 8, errors.New("unexpected error"), 12, 14, 16, 18, 20,
 	}
 
 	require.Equal(t, expected, results)
@@ -94,9 +100,9 @@ func TestCreatePipelineStep_ErrorFirstStep(t *testing.T) {
 
 	ctx := context.Background()
 
-	errorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("error", inputStream, errorPipelineFunc))
-	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", errorStream, addPipelineFunc))
-	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", addedStream, multiplyPipelineFunc))
+	errorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("error", false, inputStream, errorPipelineFunc))
+	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", false, errorStream, addPipelineFunc))
+	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", false, addedStream, multiplyPipelineFunc))
 
 	results := []interface{}{}
 	for i := range channels.OrDone(ctx, multipliedStream) {
@@ -108,7 +114,33 @@ func TestCreatePipelineStep_ErrorFirstStep(t *testing.T) {
 	}
 
 	expected := []interface{}{
-		channels.NewPipelineErr("error", errors.New("unexpected error")), 6, 8, 10, 12, 14, 16, 18, 20,
+		errors.New("unexpected error"), 6, 8, 10, 12, 14, 16, 18, 20,
+	}
+
+	require.Equal(t, expected, results)
+}
+
+func TestCreatePipelineStep_ErrorFirstStep_LastStepHandleErr(t *testing.T) {
+	inputStream := channels.GeneratorFromSlice(context.Background(), 10, 2, 3, 4, 5, 6, 7, 8, 9)
+
+	ctx := context.Background()
+
+	errorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("error", false, inputStream, errorPipelineFunc))
+	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", false, errorStream, addPipelineFunc))
+	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	handleErrorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("handleErr", true, multipliedStream, handleErrFunc))
+
+	results := []interface{}{}
+	for i := range channels.OrDone(ctx, handleErrorStream) {
+		if i.Err != nil {
+			results = append(results, i.Err)
+		} else {
+			results = append(results, i.Value)
+		}
+	}
+
+	expected := []interface{}{
+		"error was handled gracefully", 6, 8, 10, 12, 14, 16, 18, 20,
 	}
 
 	require.Equal(t, expected, results)
@@ -142,6 +174,36 @@ func TestFanIn(t *testing.T) {
 
 	require.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, result)
 
+}
+
+func TestFanOutFanIn(t *testing.T) {
+	ctx := context.Background()
+
+	fanAmount := 10
+
+	inputStream := make(chan channels.PipelineData)
+	go func() {
+		defer close(inputStream)
+		for i := 0; i < fanAmount; i++ {
+			j := i
+			channels.WriteOrDone(ctx, channels.PipelineData{Value: j}, inputStream)
+		}
+	}()
+
+	results := channels.FanOutFanIn(ctx, fanAmount, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
+
+	resultSlice := []int{}
+	for data := range results {
+		if data.Value != nil {
+			resultSlice = append(resultSlice, data.Value.(int))
+		}
+	}
+
+	sort.Slice(resultSlice, func(i, j int) bool {
+		return resultSlice[i] < resultSlice[j]
+	})
+
+	require.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, resultSlice)
 }
 
 func TestOrDone_CancelContext(t *testing.T) {
@@ -185,7 +247,7 @@ func TestFanOut(t *testing.T) {
 		}
 	}()
 
-	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", inputStream, addPipelineFunc))
+	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
 
 	r := channels.FanIn(ctx, results...)
 
@@ -219,7 +281,7 @@ func TestFanOut_MoreValuesThanChannels(t *testing.T) {
 		}
 	}()
 
-	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", inputStream, addPipelineFunc))
+	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
 
 	r := channels.FanIn(ctx, results...)
 
@@ -254,7 +316,7 @@ func TestFanOut_LessValuesThanChannels(t *testing.T) {
 		}
 	}()
 
-	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", inputStream, addPipelineFunc))
+	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
 
 	r := channels.FanIn(ctx, results...)
 

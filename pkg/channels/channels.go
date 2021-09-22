@@ -18,7 +18,6 @@ type (
 	// Err should be checked in all steps, and if present, step should not do anything, just forward the error
 	// This patterns makes our error handling easier, caring about it only in the final steps of the pipeline
 	PipelineData struct {
-		Ctx   context.Context
 		Value interface{}
 		Err   error
 	}
@@ -28,9 +27,10 @@ type (
 
 	// CreateStepRequest Wrapper struct to create pipeline steps
 	CreateStepRequest struct {
-		Name        string           // Name is the name of given step
-		Func        PipelineStepFunc // Func is the func that this step will execute
-		InputStream Stream           // InputStream is the stream that a step will receive data from
+		Name         string           // Name is the name of given step
+		Func         PipelineStepFunc // Func is the func that this step will execute
+		InputStream  Stream           // InputStream is the stream that a step will receive data from
+		ReceiveError bool             // ReceiveError indicates if this step will receive the input even if previous steps err is not nil
 	}
 
 	Stream <-chan PipelineData
@@ -45,11 +45,12 @@ func NewPipelineErr(step string, err error) error {
 }
 
 // NewCreateStepRequest helper function to instantiate CreateStepRequest
-func NewCreateStepRequest(name string, inputStream <-chan PipelineData, stepFunc PipelineStepFunc) CreateStepRequest {
+func NewCreateStepRequest(name string, receiveError bool, inputStream <-chan PipelineData, stepFunc PipelineStepFunc) CreateStepRequest {
 	return CreateStepRequest{
-		Name:        name,
-		Func:        stepFunc,
-		InputStream: inputStream,
+		Name:         name,
+		Func:         stepFunc,
+		InputStream:  inputStream,
+		ReceiveError: receiveError,
 	}
 }
 
@@ -61,7 +62,6 @@ func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) Stream {
 
 		for _, v := range inputSlice {
 			data := PipelineData{
-				Ctx:   ctx,
 				Value: v,
 			}
 
@@ -77,16 +77,17 @@ func CreatePipelineStep(ctx context.Context, request CreateStepRequest) Stream {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)
-		for i := range OrDone(ctx, request.InputStream) {
-			// if err is not nil, we should do anything with this register, just forward it
-			if i.Err != nil {
-				WriteOrDone(ctx, i, outputStream)
+		for input := range OrDone(ctx, request.InputStream) {
+			// if err is not nil, we shouldn't do anything with this register, just forward it
+			if input.Err != nil && !request.ReceiveError {
+				WriteOrDone(ctx, input, outputStream)
 				continue
 			}
 
-			output, err := request.Func(ctx, i)
+			output, err := request.Func(ctx, input)
 			if err != nil {
-				WriteOrDone(ctx, PipelineData{Err: NewPipelineErr(request.Name, err)}, outputStream)
+				input.Err = err
+				WriteOrDone(ctx, input, outputStream)
 				continue
 			}
 
@@ -96,6 +97,12 @@ func CreatePipelineStep(ctx context.Context, request CreateStepRequest) Stream {
 	}()
 
 	return outputStream
+}
+
+// FanOutFanIn utility func to expand and then join a step
+func FanOutFanIn(ctx context.Context, fanAmount int, request CreateStepRequest) Stream {
+	fannedOuts := FanOut(ctx, fanAmount, request)
+	return FanIn(ctx, fannedOuts...)
 }
 
 // FanOut will generate an array of of streams given an input stream, processed by the pipeFunc

@@ -3,11 +3,13 @@ package channels_test
 import (
 	"context"
 	"errors"
-	"github.com/stretchr/testify/require"
 	"go-pipeline-stream/pkg/channels"
+
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -222,6 +224,23 @@ func TestOrDone_CancelContext(t *testing.T) {
 
 }
 
+func TestOrDone_TimeoutOnStep(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+
+	gen := channels.GeneratorFromSlice(ctx, 1, 2, 3, 4)
+	s := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("slowmo", false, gen, slowFunc))
+
+	select {
+	case <-channels.OrDone(ctx, s):
+		// reaching this part of code means test passed
+		require.True(t, true)
+	case <-time.After(time.Second * 2):
+		require.Fail(t, "timeout by the test mechanism, which means our OrDone check didn't function properly")
+	}
+
+}
+
 func TestOrDone_ClosedChannel(t *testing.T) {
 	ctx := context.Background()
 
@@ -364,7 +383,8 @@ func TestWriteOrDone_CancelledContext(t *testing.T) {
 	data := channels.PipelineData{Value: 1}
 	outputStream := make(chan channels.PipelineData)
 
-	ctx, _ := context.WithTimeout(context.Background(), time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
 
 	// this write deadlocks, because no one is listening to this OutputStream
 	channels.WriteOrDone(ctx, data, outputStream)

@@ -162,7 +162,7 @@ func OrDone(ctx context.Context, inputStream <-chan PipelineData) Stream {
 			case <-ctx.Done(): // exit as soon as the context is done
 				return
 			case v, ok := <-inputStream:
-				if ok == false { // ok == false means the input channel was closed
+				if !ok { // ok == false means the input channel was closed
 					return
 				}
 				select {

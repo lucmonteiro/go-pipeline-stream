@@ -29,7 +29,7 @@ keeping the code as simple as possible.
 ### 1 - Always close what you open:
 
 Channels (as any resource) should always be closed by whoever created them - This ensures that our code will be less
-complicated, and we won't have to worry about closing channels everywhere. A simple example of how to handle this, in a
+complicated, and we won't have to worry about closed channels everywhere. A simple example of how to handle this, in a
 int generator stream is in the snippet below. </br></br>
 Failing to close the channel like this might result in deadlocks / stuck routines.
 

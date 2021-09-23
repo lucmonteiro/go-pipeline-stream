@@ -66,6 +66,8 @@ child context (that will be cancelled if the father context is) for each entry w
 Just be sure to set a decent amount of time, it doesn't have to be small - timeouts are a safeguard that should not be
 happening a lot.
 
+More information about the use of context can be found at: https://pkg.go.dev/context
+
 ### 3 - Avoid "super steps":
 
 Having a super step brings the same problems of having a super class: <br>

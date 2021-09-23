@@ -1,9 +1,9 @@
-package channels_test
+package streams_test
 
 import (
 	"context"
 	"errors"
-	"go-pipeline-stream/pkg/channels"
+	"go-pipeline-stream/pkg/streams"
 
 	"sort"
 	"testing"
@@ -13,34 +13,34 @@ import (
 )
 
 var (
-	slowFunc = func(ctx context.Context, input channels.PipelineData) (output channels.PipelineData, err error) {
+	slowFunc = func(ctx context.Context, input streams.PipelineData) (output streams.PipelineData, err error) {
 		<-time.After(time.Second * 10)
 		return input, nil
 	}
 
-	addPipelineFunc = func(ctx context.Context, input channels.PipelineData) (output channels.PipelineData, err error) {
+	addPipelineFunc = func(ctx context.Context, input streams.PipelineData) (output streams.PipelineData, err error) {
 		intAmount := input.Value.(int) + 1
 		output.Value = intAmount
 		return
 	}
 
-	multiplyPipelineFunc = func(ctx context.Context, input channels.PipelineData) (output channels.PipelineData, err error) {
+	multiplyPipelineFunc = func(ctx context.Context, input streams.PipelineData) (output streams.PipelineData, err error) {
 		intAmount := input.Value.(int) * 2
 		output.Value = intAmount
 		return
 	}
 
-	errorPipelineFunc = func(ctx context.Context, input channels.PipelineData) (channels.PipelineData, error) {
+	errorPipelineFunc = func(ctx context.Context, input streams.PipelineData) (streams.PipelineData, error) {
 		if input.Value.(int) == 10 {
-			return channels.PipelineData{}, errors.New("unexpected error")
+			return streams.PipelineData{}, errors.New("unexpected error")
 		}
 
 		return input, nil
 	}
 
-	handleErrFunc = func(ctx context.Context, input channels.PipelineData) (channels.PipelineData, error) {
+	handleErrFunc = func(ctx context.Context, input streams.PipelineData) (streams.PipelineData, error) {
 		if input.Err != nil {
-			return channels.PipelineData{Value: "error was handled gracefully"}, nil
+			return streams.PipelineData{Value: "error was handled gracefully"}, nil
 		}
 
 		return input, nil
@@ -48,15 +48,15 @@ var (
 )
 
 func TestCreatePipelineStep_Success(t *testing.T) {
-	inputStream := channels.GeneratorFromSlice(context.Background(), 1, 2, 3, 4, 5, 6, 7, 8, 9)
+	inputStream := streams.GeneratorFromSlice(context.Background(), 1, 2, 3, 4, 5, 6, 7, 8, 9)
 
 	ctx := context.Background()
 
-	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
-	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
 
 	results := []interface{}{}
-	for i := range channels.OrDone(ctx, multipliedStream) {
+	for i := range streams.OrDone(ctx, multipliedStream) {
 		if i.Err != nil {
 			results = append(results, i.Err)
 		} else {
@@ -73,16 +73,16 @@ func TestCreatePipelineStep_Success(t *testing.T) {
 
 func TestCreatePipelineStep_Error_LastStep(t *testing.T) {
 
-	inputStream := channels.GeneratorFromSlice(context.Background(), 1, 2, 3, 4, 5, 6, 7, 8, 9)
+	inputStream := streams.GeneratorFromSlice(context.Background(), 1, 2, 3, 4, 5, 6, 7, 8, 9)
 
 	ctx := context.Background()
 
-	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
-	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", false, addedStream, multiplyPipelineFunc))
-	errorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("error", false, multipliedStream, errorPipelineFunc))
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	errorStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("error", false, multipliedStream, errorPipelineFunc))
 
 	results := []interface{}{}
-	for i := range channels.OrDone(ctx, errorStream) {
+	for i := range streams.OrDone(ctx, errorStream) {
 		if i.Err != nil {
 			results = append(results, i.Err)
 		} else {
@@ -98,16 +98,16 @@ func TestCreatePipelineStep_Error_LastStep(t *testing.T) {
 }
 
 func TestCreatePipelineStep_ErrorFirstStep(t *testing.T) {
-	inputStream := channels.GeneratorFromSlice(context.Background(), 10, 2, 3, 4, 5, 6, 7, 8, 9)
+	inputStream := streams.GeneratorFromSlice(context.Background(), 10, 2, 3, 4, 5, 6, 7, 8, 9)
 
 	ctx := context.Background()
 
-	errorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("error", false, inputStream, errorPipelineFunc))
-	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", false, errorStream, addPipelineFunc))
-	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	errorStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("error", false, inputStream, errorPipelineFunc))
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("add", false, errorStream, addPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
 
 	results := []interface{}{}
-	for i := range channels.OrDone(ctx, multipliedStream) {
+	for i := range streams.OrDone(ctx, multipliedStream) {
 		if i.Err != nil {
 			results = append(results, i.Err)
 		} else {
@@ -123,17 +123,17 @@ func TestCreatePipelineStep_ErrorFirstStep(t *testing.T) {
 }
 
 func TestCreatePipelineStep_ErrorFirstStep_LastStepHandleErr(t *testing.T) {
-	inputStream := channels.GeneratorFromSlice(context.Background(), 10, 2, 3, 4, 5, 6, 7, 8, 9)
+	inputStream := streams.GeneratorFromSlice(context.Background(), 10, 2, 3, 4, 5, 6, 7, 8, 9)
 
 	ctx := context.Background()
 
-	errorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("error", false, inputStream, errorPipelineFunc))
-	addedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("add", false, errorStream, addPipelineFunc))
-	multipliedStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("multiply", false, addedStream, multiplyPipelineFunc))
-	handleErrorStream := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("handleErr", true, multipliedStream, handleErrFunc))
+	errorStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("error", false, inputStream, errorPipelineFunc))
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("add", false, errorStream, addPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	handleErrorStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("handleErr", true, multipliedStream, handleErrFunc))
 
 	results := []interface{}{}
-	for i := range channels.OrDone(ctx, handleErrorStream) {
+	for i := range streams.OrDone(ctx, handleErrorStream) {
 		if i.Err != nil {
 			results = append(results, i.Err)
 		} else {
@@ -149,21 +149,21 @@ func TestCreatePipelineStep_ErrorFirstStep_LastStepHandleErr(t *testing.T) {
 }
 
 func TestFanIn(t *testing.T) {
-	chans := make([]channels.Stream, 10)
+	chans := make([]streams.Stream, 10)
 
 	for i := 0; i < 10; i++ {
 		a := i
-		simpleChan := make(chan channels.PipelineData)
+		simpleChan := make(chan streams.PipelineData)
 		go func() {
 			defer close(simpleChan)
-			simpleChan <- channels.PipelineData{Value: a}
+			simpleChan <- streams.PipelineData{Value: a}
 		}()
 
 		chans[i] = simpleChan
 	}
 
 	ctx := context.Background()
-	output := channels.FanIn(ctx, chans...)
+	output := streams.FanIn(ctx, chans...)
 	result := []int{}
 
 	for elem := range output {
@@ -183,16 +183,16 @@ func TestFanOutFanIn(t *testing.T) {
 
 	fanAmount := 10
 
-	inputStream := make(chan channels.PipelineData)
+	inputStream := make(chan streams.PipelineData)
 	go func() {
 		defer close(inputStream)
 		for i := 0; i < fanAmount; i++ {
 			j := i
-			channels.WriteOrDone(ctx, channels.PipelineData{Value: j}, inputStream)
+			streams.WriteOrDone(ctx, streams.PipelineData{Value: j}, inputStream)
 		}
 	}()
 
-	results := channels.FanOutFanIn(ctx, fanAmount, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
+	results := streams.FanOutFanIn(ctx, fanAmount, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
 
 	resultSlice := []int{}
 	for data := range results {
@@ -212,10 +212,10 @@ func TestOrDone_CancelContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancel()
 
-	infiniteChannel := make(chan channels.PipelineData)
+	infiniteChannel := make(chan streams.PipelineData)
 
 	select {
-	case <-channels.OrDone(ctx, infiniteChannel):
+	case <-streams.OrDone(ctx, infiniteChannel):
 		// reaching this part of code means test passed
 		require.True(t, true)
 	case <-time.After(time.Second * 2):
@@ -228,11 +228,11 @@ func TestOrDone_TimeoutOnStep(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancel()
 
-	gen := channels.GeneratorFromSlice(ctx, 1, 2, 3, 4)
-	s := channels.CreatePipelineStep(ctx, channels.NewCreateStepRequest("slowmo", false, gen, slowFunc))
+	gen := streams.GeneratorFromSlice(ctx, 1, 2, 3, 4)
+	s := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("slowmo", false, gen, slowFunc))
 
 	select {
-	case <-channels.OrDone(ctx, s):
+	case <-streams.OrDone(ctx, s):
 		// reaching this part of code means test passed
 		require.True(t, true)
 	case <-time.After(time.Second * 2):
@@ -244,10 +244,10 @@ func TestOrDone_TimeoutOnStep(t *testing.T) {
 func TestOrDone_ClosedChannel(t *testing.T) {
 	ctx := context.Background()
 
-	channel := make(chan channels.PipelineData)
+	channel := make(chan streams.PipelineData)
 	close(channel)
 
-	result := <-channels.OrDone(ctx, channel)
+	result := <-streams.OrDone(ctx, channel)
 	require.Empty(t, result.Value)
 
 }
@@ -257,18 +257,18 @@ func TestFanOut(t *testing.T) {
 
 	fanAmount := 10
 
-	inputStream := make(chan channels.PipelineData)
+	inputStream := make(chan streams.PipelineData)
 	go func() {
 		defer close(inputStream)
 		for i := 0; i < fanAmount; i++ {
 			j := i
-			channels.WriteOrDone(ctx, channels.PipelineData{Value: j}, inputStream)
+			streams.WriteOrDone(ctx, streams.PipelineData{Value: j}, inputStream)
 		}
 	}()
 
-	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
+	results := streams.FanOut(ctx, fanAmount, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
 
-	r := channels.FanIn(ctx, results...)
+	r := streams.FanIn(ctx, results...)
 
 	resultSlice := []int{}
 	for data := range r {
@@ -290,19 +290,19 @@ func TestFanOut_MoreValuesThanChannels(t *testing.T) {
 	fanAmount := 10
 
 	expected := []int{}
-	inputStream := make(chan channels.PipelineData)
+	inputStream := make(chan streams.PipelineData)
 	go func() {
 		defer close(inputStream)
 		for i := 0; i < fanAmount*100; i++ {
 			j := i
 			expected = append(expected, j+1)
-			channels.WriteOrDone(ctx, channels.PipelineData{Value: j}, inputStream)
+			streams.WriteOrDone(ctx, streams.PipelineData{Value: j}, inputStream)
 		}
 	}()
 
-	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
+	results := streams.FanOut(ctx, fanAmount, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
 
-	r := channels.FanIn(ctx, results...)
+	r := streams.FanIn(ctx, results...)
 
 	resultSlice := []int{}
 	for data := range r {
@@ -325,19 +325,19 @@ func TestFanOut_LessValuesThanChannels(t *testing.T) {
 	fanAmount := 10
 
 	expected := []int{}
-	inputStream := make(chan channels.PipelineData)
+	inputStream := make(chan streams.PipelineData)
 	go func() {
 		defer close(inputStream)
 		for i := 0; i < fanAmount/2; i++ {
 			j := i
 			expected = append(expected, j+1)
-			channels.WriteOrDone(ctx, channels.PipelineData{Value: j}, inputStream)
+			streams.WriteOrDone(ctx, streams.PipelineData{Value: j}, inputStream)
 		}
 	}()
 
-	results := channels.FanOut(ctx, fanAmount, channels.NewCreateStepRequest("add", false, inputStream, addPipelineFunc))
+	results := streams.FanOut(ctx, fanAmount, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
 
-	r := channels.FanIn(ctx, results...)
+	r := streams.FanIn(ctx, results...)
 
 	resultSlice := []int{}
 	for data := range r {
@@ -358,36 +358,36 @@ func TestOrDone_FinishReading(t *testing.T) {
 
 	ctx := context.Background()
 
-	channel := make(chan channels.PipelineData)
+	channel := make(chan streams.PipelineData)
 	go func() {
 		defer close(channel)
-		channel <- channels.PipelineData{Value: 1}
+		channel <- streams.PipelineData{Value: 1}
 	}()
 
-	result := <-channels.OrDone(ctx, channel)
+	result := <-streams.OrDone(ctx, channel)
 
 	require.Equal(t, 1, result.Value)
 }
 
 func TestWriteOrDone(t *testing.T) {
-	data := channels.PipelineData{Value: 1}
-	outputStream := make(chan channels.PipelineData)
+	data := streams.PipelineData{Value: 1}
+	outputStream := make(chan streams.PipelineData)
 	go func() {
-		channels.WriteOrDone(context.Background(), data, outputStream)
+		streams.WriteOrDone(context.Background(), data, outputStream)
 	}()
 
 	require.Equal(t, data, <-outputStream)
 }
 
 func TestWriteOrDone_CancelledContext(t *testing.T) {
-	data := channels.PipelineData{Value: 1}
-	outputStream := make(chan channels.PipelineData)
+	data := streams.PipelineData{Value: 1}
+	outputStream := make(chan streams.PipelineData)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 
 	// this write deadlocks, because no one is listening to this OutputStream
-	channels.WriteOrDone(ctx, data, outputStream)
+	streams.WriteOrDone(ctx, data, outputStream)
 
 	// so if tests reach this point, it's a success
 	require.True(t, true)

@@ -126,7 +126,7 @@ communicate between goroutines - it's a safer approach. </br>
 If the need arises (for example, for holding a cache of processed ids to avoid duplications), always use the sync
 package to control the access to these variables.
 
-# Channels package
+# Streams package
 
 It is important to notice that in order to make these functions reusable, we declared the type of the channels as <-
 chan PipelineData. </br>
@@ -143,7 +143,7 @@ Failing to do so will lead into hard to maintain code, which is not our goal!
 
 We suggest that you create a specific type for each Pipeline, containing relevant information for the execution at hand.
 
-## PipeFunc
+## StreamFunc
 
 This function is used to create pipeline steps. It's signature is very simple:
 

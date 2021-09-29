@@ -3,13 +3,11 @@ package streams_test
 import (
 	"context"
 	"errors"
+	"github.com/stretchr/testify/require"
 	"go-pipeline-stream/pkg/streams"
-
 	"sort"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -52,8 +50,8 @@ func TestCreatePipelineStep_Success(t *testing.T) {
 
 	ctx := context.Background()
 
-	addedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
-	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("add", false, inputStream, addPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
 
 	results := []interface{}{}
 	for i := range streams.OrDone(ctx, multipliedStream) {
@@ -71,15 +69,41 @@ func TestCreatePipelineStep_Success(t *testing.T) {
 	require.Equal(t, expected, results)
 }
 
+func TestCreatePipelineStep_Error_Middle(t *testing.T) {
+
+	inputStream := streams.GeneratorFromSlice(context.Background(), 1, 2, 3, 4, 5, 6, 7, 8, 9)
+
+	ctx := context.Background()
+
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("add", false, inputStream, addPipelineFunc))
+	errorStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("error", false, addedStream, errorPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("multiply", false, errorStream, multiplyPipelineFunc))
+
+	results := []interface{}{}
+	for i := range streams.OrDone(ctx, multipliedStream) {
+		if i.Err != nil {
+			results = append(results, i.Err)
+		} else {
+			results = append(results, i.Value)
+		}
+	}
+
+	expected := []interface{}{
+		4, 6, 8, 10, 12, 14, 16, 18, errors.New("unexpected error"),
+	}
+
+	require.Equal(t, expected, results)
+}
+
 func TestCreatePipelineStep_Error_LastStep(t *testing.T) {
 
 	inputStream := streams.GeneratorFromSlice(context.Background(), 1, 2, 3, 4, 5, 6, 7, 8, 9)
 
 	ctx := context.Background()
 
-	addedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
-	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
-	errorStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("error", false, multipliedStream, errorPipelineFunc))
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("add", false, inputStream, addPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	errorStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("error", false, multipliedStream, errorPipelineFunc))
 
 	results := []interface{}{}
 	for i := range streams.OrDone(ctx, errorStream) {
@@ -102,9 +126,9 @@ func TestCreatePipelineStep_ErrorFirstStep(t *testing.T) {
 
 	ctx := context.Background()
 
-	errorStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("error", false, inputStream, errorPipelineFunc))
-	addedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("add", false, errorStream, addPipelineFunc))
-	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	errorStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("error", false, inputStream, errorPipelineFunc))
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("add", false, errorStream, addPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
 
 	results := []interface{}{}
 	for i := range streams.OrDone(ctx, multipliedStream) {
@@ -127,10 +151,10 @@ func TestCreatePipelineStep_ErrorFirstStep_LastStepHandleErr(t *testing.T) {
 
 	ctx := context.Background()
 
-	errorStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("error", false, inputStream, errorPipelineFunc))
-	addedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("add", false, errorStream, addPipelineFunc))
-	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
-	handleErrorStream := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("handleErr", true, multipliedStream, handleErrFunc))
+	errorStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("error", false, inputStream, errorPipelineFunc))
+	addedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("add", false, errorStream, addPipelineFunc))
+	multipliedStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("multiply", false, addedStream, multiplyPipelineFunc))
+	handleErrorStream := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("handleErr", true, multipliedStream, handleErrFunc))
 
 	results := []interface{}{}
 	for i := range streams.OrDone(ctx, handleErrorStream) {
@@ -192,7 +216,7 @@ func TestFanOutFanIn(t *testing.T) {
 		}
 	}()
 
-	results := streams.FanOutFanIn(ctx, fanAmount, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
+	results := streams.FanOutFanIn(ctx, fanAmount, streams.NewStreamRequest("add", false, inputStream, addPipelineFunc))
 
 	resultSlice := []int{}
 	for data := range results {
@@ -229,7 +253,7 @@ func TestOrDone_TimeoutOnStep(t *testing.T) {
 	defer cancel()
 
 	gen := streams.GeneratorFromSlice(ctx, 1, 2, 3, 4)
-	s := streams.CreatePipelineStream(ctx, streams.NewCreateStreamRequest("slowmo", false, gen, slowFunc))
+	s := streams.CreatePipelineStream(ctx, streams.NewStreamRequest("slowmo", false, gen, slowFunc))
 
 	select {
 	case <-streams.OrDone(ctx, s):
@@ -266,12 +290,42 @@ func TestFanOut(t *testing.T) {
 		}
 	}()
 
-	results := streams.FanOut(ctx, fanAmount, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
+	results := streams.FanOut(ctx, fanAmount, streams.NewStreamRequest("add", false, inputStream, addPipelineFunc))
 
 	r := streams.FanIn(ctx, results...)
 
 	resultSlice := []int{}
 	for data := range r {
+		if data.Value != nil {
+			resultSlice = append(resultSlice, data.Value.(int))
+		}
+	}
+
+	sort.Slice(resultSlice, func(i, j int) bool {
+		return resultSlice[i] < resultSlice[j]
+	})
+
+	require.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, resultSlice)
+}
+
+func TestFanOutFanin(t *testing.T) {
+	ctx := context.Background()
+
+	fanAmount := 10
+
+	inputStream := make(chan streams.PipelineData)
+	go func() {
+		defer close(inputStream)
+		for i := 0; i < fanAmount; i++ {
+			j := i
+			streams.WriteOrDone(ctx, streams.PipelineData{Value: j}, inputStream)
+		}
+	}()
+
+	results := streams.FanOutFanIn(ctx, fanAmount, streams.NewStreamRequest("add", false, inputStream, addPipelineFunc))
+
+	resultSlice := []int{}
+	for data := range results {
 		if data.Value != nil {
 			resultSlice = append(resultSlice, data.Value.(int))
 		}
@@ -300,7 +354,7 @@ func TestFanOut_MoreValuesThanChannels(t *testing.T) {
 		}
 	}()
 
-	results := streams.FanOut(ctx, fanAmount, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
+	results := streams.FanOut(ctx, fanAmount, streams.NewStreamRequest("add", false, inputStream, addPipelineFunc))
 
 	r := streams.FanIn(ctx, results...)
 
@@ -335,7 +389,7 @@ func TestFanOut_LessValuesThanChannels(t *testing.T) {
 		}
 	}()
 
-	results := streams.FanOut(ctx, fanAmount, streams.NewCreateStreamRequest("add", false, inputStream, addPipelineFunc))
+	results := streams.FanOut(ctx, fanAmount, streams.NewStreamRequest("add", false, inputStream, addPipelineFunc))
 
 	r := streams.FanIn(ctx, results...)
 

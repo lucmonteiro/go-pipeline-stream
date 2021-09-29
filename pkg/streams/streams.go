@@ -9,7 +9,6 @@ import (
 type (
 
 	// PipelineData is the struct we transit between our pipelineSteps.
-	// Ctx can be the context of the whole execution, or a ctx specific to this line (ex: ctx with lock tokens)
 	// Err should be checked in all steps, and if present, step should not do anything, just forward the error
 	// This patterns makes our error handling easier, caring about it only in the final steps of the pipeline
 	PipelineData struct {
@@ -24,15 +23,17 @@ type (
 	CreateStreamRequest struct {
 		Name         string     // Name is the name of given step
 		Func         StreamFunc // Func is the func that this step will execute
-		InputStream  Stream     // InputStream is the streams that a step will receive data from
+		InputStream  Stream     // InputStream is the stream that a step will receive data from
 		ReceiveError bool       // ReceiveError indicates if this step will receive the input even if previous steps err is not nil
 	}
 
+	// Stream is a receive-only channel of PipelineData
+	// Using receive-only channels is good to avoid someone from writing in a wrong channel
 	Stream <-chan PipelineData
 )
 
-// NewCreateStreamRequest helper function to instantiate CreateStreamRequest
-func NewCreateStreamRequest(name string, receiveError bool, inputStream <-chan PipelineData, stepFunc StreamFunc) CreateStreamRequest {
+// NewStreamRequest helper function to instantiate CreateStreamRequest
+func NewStreamRequest(name string, receiveError bool, inputStream Stream, stepFunc StreamFunc) CreateStreamRequest {
 	return CreateStreamRequest{
 		Name:         name,
 		Func:         stepFunc,
@@ -66,11 +67,9 @@ func CreatePipelineStream(ctx context.Context, request CreateStreamRequest) Stre
 	go func() {
 		defer close(outputStream)
 		for input := range OrDone(ctx, request.InputStream) {
-
 			// if err is not nil, we shouldn't do anything with this register, just forward it
 			if input.Err != nil && !request.ReceiveError {
 				WriteOrDone(ctx, input, outputStream)
-
 				continue
 			}
 
@@ -83,7 +82,6 @@ func CreatePipelineStream(ctx context.Context, request CreateStreamRequest) Stre
 			}
 
 			WriteOrDone(ctx, output, outputStream)
-
 		}
 	}()
 
@@ -91,12 +89,12 @@ func CreatePipelineStream(ctx context.Context, request CreateStreamRequest) Stre
 }
 
 // FanOutFanIn utility func to expand and then join a step
-func FanOutFanIn(ctx context.Context, fanAmount int, request CreateStreamRequest) Stream {
-	fannedOuts := FanOut(ctx, fanAmount, request)
+func FanOutFanIn(ctx context.Context, fanQuantity int, request CreateStreamRequest) Stream {
+	fannedOuts := FanOut(ctx, fanQuantity, request)
 	return FanIn(ctx, fannedOuts...)
 }
 
-// FanOut will generate an array of of streams given an input streams, processed by the pipeFunc
+// FanOut will generate an array of streams given an input streams, processed by the pipeFunc
 // Use FanIn after using this function in order to join the resulting streams into another streams.
 func FanOut(ctx context.Context, fanAmount int, request CreateStreamRequest) []Stream {
 	streams := make([]Stream, fanAmount)
@@ -116,17 +114,16 @@ func FanIn(ctx context.Context, channels ...Stream) Stream {
 	multiplexedStream := make(chan PipelineData)
 
 	// create a func to write to the OutputStream given the input streams
-	multiplex := func(c Stream) {
+	multiplexFunc := func(c Stream) {
 		defer wg.Done()                       // tells wait group this channel is done
 		for element := range OrDone(ctx, c) { //Range through input channel
 			multiplexedStream <- element // write to output streams
 		}
-		// increase
 	}
 
-	wg.Add(len(channels)) // tells wait group it has to wait for N streams
 	for _, c := range channels {
-		go multiplex(c) // start writing to the multiplexedStream
+		wg.Add(1)           // tells wait group it has to wait for N streams
+		go multiplexFunc(c) // start writing to the multiplexedStream
 	}
 
 	go func() { // start a async func that will close the multiplexedStream as soon as all streams are done reading from (or cancelled ctx)
@@ -147,7 +144,7 @@ func WriteOrDone(ctx context.Context, write PipelineData, to chan<- PipelineData
 
 // OrDone will read encapsulate the logic of listening to the context's done or the input channel close
 // It's useful to ensure goroutines will not be leaked and keep the code idiomatic.
-func OrDone(ctx context.Context, inputStream <-chan PipelineData) Stream {
+func OrDone(ctx context.Context, inputStream Stream) Stream {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)
@@ -159,10 +156,8 @@ func OrDone(ctx context.Context, inputStream <-chan PipelineData) Stream {
 				if !ok { // ok == false means the input channel was closed
 					return
 				}
-				select {
-				case outputStream <- v: // write to value streams
-				case <-ctx.Done(): //or exit if context is done and no one is reading from OutputStream (routine stuck in the write))
-				}
+
+				WriteOrDone(ctx, v, outputStream)
 			}
 		}
 	}()

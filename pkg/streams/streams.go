@@ -2,8 +2,8 @@ package streams
 
 import (
 	"context"
-	"fmt"
 	"sync"
+	"time"
 )
 
 type (
@@ -21,7 +21,8 @@ type (
 
 	// CreateStreamRequest Wrapper struct to create pipeline steps
 	CreateStreamRequest struct {
-		Name         string     // Name is the name of given step
+		Name         string     // Name is the name of the pipeline that this step belongs to
+		Step         string     // Step is the name of the step
 		Func         StreamFunc // Func is the func that this step will execute
 		InputStream  Stream     // InputStream is the stream that a step will receive data from
 		ReceiveError bool       // ReceiveError indicates if this step will receive the input even if previous steps err is not nil
@@ -33,17 +34,29 @@ type (
 )
 
 // NewStreamRequest helper function to instantiate CreateStreamRequest
-func NewStreamRequest(name string, receiveError bool, inputStream Stream, stepFunc StreamFunc) CreateStreamRequest {
+func NewStreamRequest(name string, step string, receiveError bool, inputStream Stream, stepFunc StreamFunc) CreateStreamRequest {
 	return CreateStreamRequest{
 		Name:         name,
+		Step:         step,
 		Func:         stepFunc,
 		InputStream:  inputStream,
 		ReceiveError: receiveError,
 	}
 }
 
-// GeneratorFromSlice creates a generator from an inputSlice
-func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) Stream {
+// GenerateFromSlice generates a stream from an inputSlice
+func GenerateFromSlice(ctx context.Context, inputSlice interface{}) Stream {
+	var outputStream Stream
+
+	switch t := inputSlice.(type) {
+	case []int:
+		outputStream = generateFromIntSlice(ctx, t)
+	}
+
+	return outputStream
+}
+
+func generateFromIntSlice(ctx context.Context, inputSlice []int) Stream {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)
@@ -64,8 +77,13 @@ func GeneratorFromSlice(ctx context.Context, inputSlice ...interface{}) Stream {
 func CreatePipelineStream(ctx context.Context, request CreateStreamRequest) Stream {
 	outputStream := make(chan PipelineData)
 
+	if request.InputStream == nil {
+		return nil
+	}
+
 	go func() {
 		defer close(outputStream)
+
 		for input := range OrDone(ctx, request.InputStream) {
 			// if err is not nil, we shouldn't do anything with this register, just forward it
 			if input.Err != nil && !request.ReceiveError {
@@ -99,7 +117,6 @@ func FanOutFanIn(ctx context.Context, fanQuantity int, request CreateStreamReque
 func FanOut(ctx context.Context, fanAmount int, request CreateStreamRequest) []Stream {
 	streams := make([]Stream, fanAmount)
 	for i := 0; i < fanAmount; i++ {
-		request.Name = fmt.Sprintf("%s#%d", request.Name, i)
 		streams[i] = CreatePipelineStream(ctx, request)
 	}
 
@@ -148,10 +165,20 @@ func OrDone(ctx context.Context, inputStream Stream) Stream {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)
+
+		if inputStream == nil {
+			return
+		}
+
 		for {
 			select {
 			case <-ctx.Done(): // exit as soon as the context is done
-				return
+				select {
+				case outputStream <- PipelineData{Err: ctx.Err()}:
+					return
+				case <-time.After(time.Second): // safeguard in case no routines are listening to the outputStream
+					return
+				}
 			case v, ok := <-inputStream:
 				if !ok { // ok == false means the input channel was closed
 					return

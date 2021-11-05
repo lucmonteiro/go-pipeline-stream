@@ -126,6 +126,80 @@ communicate between goroutines - it's a safer approach. </br>
 If the need arises (for example, for holding a cache of processed ids to avoid duplications), always use the sync
 package to control the access to these variables.
 
+# Usage example
+
+First of all, we need to understand the concepts of this lib:
+
+- PipelineBuilder builds a pipeline.
+   One pipeline constains:
+    - Either a generatorFunc (which writes to an stream) or a inputStream
+    - Steps that are executed in order they are added to the builder. The pipeline provide the result of the previous step as an stream to the next step
+    - Teardown steps to release locks / resources acquired at "row" level
+    - An error handler to handle errors gracefully (ex: write to an error file)
+
+The StreamFunc signature is simple:
+```
+func(ctx context.Context, input Streamable) (output []Streamable, err error)
+```
+
+In receives a Streamable struct (which can be defined by whoever wants to use this lib) and returns an [] of Streamables.</br>
+The idea here is that every steps receives an input and outputs 1...N registers according to it's needs. 
+It's advised to use the same type for the whole pipeline, to avoid having to worry to cast to multiple types.<br>
+
+Sample pipeline use cases:
+- Process a one register down a pipeline: 
+    - Receives a file entry with an id
+    - Take register
+    - Perform validations (or whatever)
+    - Update Order
+    - Write to a file
+    - Release lock (teardown)
+
+- Confirm a batch of registers:
+    - Receive a batch id and output an [] of ids to be processed down the pipeline
+    - get id
+    - do something
+    - write
+    - release
+
+
+Create a PipelineBuilder:
+````
+builder := streamsv2.NewPipelineBuilder("pipeline_name")
+````
+
+Provide an inputStream to the pipeline (or a generatorFunc), which is a chan streams.PipelineData:
+```
+builder.WithInputStream(inputStream)
+```
+
+Then, we add some steps for the pipeline (they will be executed in order, so keep that in mind:)
+```
+builder.WithSteps(
+    streamsv2.NewStep("get_trx_info", rh.numOfGoroutines, executor.getTrxInfoStep),
+    streamsv2.NewStep("get_order", rh.numOfGoroutines, executor.getOrderStep),
+    streamsv2.NewStep("update_order", rh.numOfGoroutines, executor.updateOrderStateStep),
+)
+```
+
+If we need to release any resources (for example a lock in a register), we use a TeardownStep.
+The difference of the teardownStep to the normal step is that teardown steps are always executed, 
+regardless of previous errors. Keep that in mind and always check if the resource you're releasing was in fact acquired.
+```
+builder.WithTeardownSteps(
+streamsv2.NewTeardownStep("release_lock", rh.numOfGoroutines, executor.releaseLockStep),
+)
+```
+
+For graceful error handling, an error handler might be added. Error handlers are also always invoked, currently only one
+routine (in our use case, we write on a file on this step, so this should be synchronized). Future implementations might
+add the capability to fanout here as well
+```
+builder.WithErrorHandler(t.errorHandlerStep)
+```
+
+Then, we can Build() the pipeline and Run() it providing a valid context.
+
 # Final thoughts
 
 These examples should be enough to get you going with a Pipeline Stream. </br>

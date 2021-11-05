@@ -2,156 +2,123 @@ package streams
 
 import (
 	"context"
-	"sync"
+	"errors"
 	"time"
 )
 
+var (
+	ErrTeardown = errors.New("error executing teardown step")
+)
+
+const (
+	StepTypePipelineStep     StepType = "pipeline"
+	StepTypeTeardownStep     StepType = "teardown"
+	StepTypeErrorHandlerStep StepType = "error_handler"
+
+	_errorHandlerStepName = "error_handler"
+)
+
 type (
+	// Stream is a receive-only channel of PipelineData
+	// Using receive-only channels is good to avoid someone writing in a wrong channel.
+	Stream <-chan PipelineData
+
+	// Streamable interface that must be embedded in order to Stream in the pipeline data
+	Streamable interface {
+		Stream()
+	}
+
+	Pipeline interface {
+		Run(ctx context.Context) Stream
+	}
 
 	// PipelineData is the struct we transit between our pipelineSteps.
-	// Err should be checked in all steps, and if present, step should not do anything, just forward the error
-	// This patterns makes our error handling easier, caring about it only in the final steps of the pipeline
+	// Err should be checked in all steps, and if present, Step should not do anything, just forward the error
+	// This patterns makes our error handling easier, caring about it only in the final steps of the pipeline.
 	PipelineData struct {
-		Value interface{}
+		Value Streamable
 		Err   error
 	}
 
-	// StreamFunc is the func that we will use in our steps to transform data
-	StreamFunc func(ctx context.Context, input PipelineData) (output PipelineData, err error)
+	// GeneratorFunc is the func that will be executed first by the pipeline, it must write the input data in the
+	// inputStream using WriteOrDone func
+	// errors that happen in this func should also be written in the Stream (using the Err field)
+	GeneratorFunc func(ctx context.Context, inputStream chan PipelineData)
 
-	// CreateStreamRequest Wrapper struct to create pipeline steps
-	CreateStreamRequest struct {
-		Name         string     // Name is the name of the pipeline that this step belongs to
-		Step         string     // Step is the name of the step
-		Func         StreamFunc // Func is the func that this step will execute
-		InputStream  Stream     // InputStream is the stream that a step will receive data from
-		ReceiveError bool       // ReceiveError indicates if this step will receive the input even if previous steps err is not nil
+	// StreamFunc is the func that we will use in our steps to transform data.
+	// Output is an []Streamable since in some scenarios one input can generate N outputs to be processed
+	// for example, a confirmed batch of transactions is 1-N.
+	StreamFunc func(ctx context.Context, input Streamable) (output []Streamable, err error)
+
+	// TeardownFunc functions to close opened resources and release locks.
+	// Will always execute at the end of the pipeline,
+	TeardownFunc func(ctx context.Context, input Streamable) (err error)
+
+	// ErrorHandlerFunc function to gracefully handle errors in the pipeline
+	ErrorHandlerFunc func(ctx context.Context, input PipelineData) (err error)
+
+	// PipelineStep represents a Step of the pipeline that will be executed
+	// name is the Step's name that will be tagged in the pipeline metric
+	// goroutines is used to control the number of concurrent goroutines running the same Step. If < 1, will be 1.
+	PipelineStep struct {
+		name       string
+		streamFunc StreamFunc
+		goroutines int
 	}
 
-	// Stream is a receive-only channel of PipelineData
-	// Using receive-only channels is good to avoid someone from writing in a wrong channel
-	Stream <-chan PipelineData
+	// TeardownStep is a step that is always executed (regardless of previous errors).
+	// It's used to free resources / release locks
+	// Errors will be forwarded to the ErrorHandler, they can be checked through comparing with the ErrTeardown err.
+	TeardownStep struct {
+		name         string
+		teardownFunc TeardownFunc
+		goroutines   int
+	}
+
+	PipelineError struct {
+		Step     string
+		Cause    error
+		StepType StepType
+	}
+
+	StepType string
 )
 
-// NewStreamRequest helper function to instantiate CreateStreamRequest
-func NewStreamRequest(name string, step string, receiveError bool, inputStream Stream, stepFunc StreamFunc) CreateStreamRequest {
-	return CreateStreamRequest{
-		Name:         name,
-		Step:         step,
-		Func:         stepFunc,
-		InputStream:  inputStream,
-		ReceiveError: receiveError,
+func (p PipelineError) Error() string {
+	return "error executing pipeline: " + p.Cause.Error()
+}
+
+func (p PipelineError) Unwrap() error {
+	return p.Cause
+}
+
+// NewStep creates a PipelineStep to be added to a PipelineBuilder
+func NewStep(name string, goroutines int, streamFunc StreamFunc) PipelineStep {
+	if goroutines < 1 {
+		goroutines = 1
+	}
+
+	return PipelineStep{
+		name:       name,
+		streamFunc: streamFunc,
+		goroutines: goroutines,
 	}
 }
 
-// GenerateFromSlice generates a stream from an inputSlice
-func GenerateFromSlice(ctx context.Context, inputSlice interface{}) Stream {
-	var outputStream Stream
-
-	switch t := inputSlice.(type) {
-	case []int:
-		outputStream = generateFromIntSlice(ctx, t)
+// NewTeardownStep creates a TeardownStep to be added to a PipelineBuilder
+func NewTeardownStep(name string, goroutines int, teardownFunc TeardownFunc) TeardownStep {
+	if goroutines < 1 {
+		goroutines = 1
 	}
 
-	return outputStream
-}
-
-func generateFromIntSlice(ctx context.Context, inputSlice []int) Stream {
-	outputStream := make(chan PipelineData)
-	go func() {
-		defer close(outputStream)
-
-		for _, v := range inputSlice {
-			data := PipelineData{
-				Value: v,
-			}
-
-			WriteOrDone(ctx, data, outputStream)
-		}
-	}()
-	return outputStream
-}
-
-// CreatePipelineStream is a wrapper func for simple pipeline steps.
-// It will generate a streams with the output of the createStepFunc, using the inputStream as input.
-func CreatePipelineStream(ctx context.Context, request CreateStreamRequest) Stream {
-	outputStream := make(chan PipelineData)
-
-	if request.InputStream == nil {
-		return nil
+	return TeardownStep{
+		name:         name,
+		teardownFunc: teardownFunc,
+		goroutines:   goroutines,
 	}
-
-	go func() {
-		defer close(outputStream)
-
-		for input := range OrDone(ctx, request.InputStream) {
-			// if err is not nil, we shouldn't do anything with this register, just forward it
-			if input.Err != nil && !request.ReceiveError {
-				WriteOrDone(ctx, input, outputStream)
-				continue
-			}
-
-			output, err := request.Func(ctx, input)
-			if err != nil {
-				input.Err = err
-				WriteOrDone(ctx, input, outputStream)
-
-				continue
-			}
-
-			WriteOrDone(ctx, output, outputStream)
-		}
-	}()
-
-	return outputStream
 }
 
-// FanOutFanIn utility func to expand and then join a step
-func FanOutFanIn(ctx context.Context, fanQuantity int, request CreateStreamRequest) Stream {
-	fannedOuts := FanOut(ctx, fanQuantity, request)
-	return FanIn(ctx, fannedOuts...)
-}
-
-// FanOut will generate an array of streams given an input streams, processed by the pipeFunc
-// Use FanIn after using this function in order to join the resulting streams into another streams.
-func FanOut(ctx context.Context, fanAmount int, request CreateStreamRequest) []Stream {
-	streams := make([]Stream, fanAmount)
-	for i := 0; i < fanAmount; i++ {
-		streams[i] = CreatePipelineStream(ctx, request)
-	}
-
-	// increase metric for fanned out with len of streams
-	return streams
-}
-
-// FanIn will join a variadic quantity of streams into a single channel
-// It's useful after using the fan out pattern to spawn multiple goroutines to process the same input .
-func FanIn(ctx context.Context, channels ...Stream) Stream {
-	wg := sync.WaitGroup{} // used to know we processed all streams
-	multiplexedStream := make(chan PipelineData)
-
-	// create a func to write to the OutputStream given the input streams
-	multiplexFunc := func(c Stream) {
-		defer wg.Done()                       // tells wait group this channel is done
-		for element := range OrDone(ctx, c) { //Range through input channel
-			multiplexedStream <- element // write to output streams
-		}
-	}
-
-	for _, c := range channels {
-		wg.Add(1)           // tells wait group it has to wait for N streams
-		go multiplexFunc(c) // start writing to the multiplexedStream
-	}
-
-	go func() { // start a async func that will close the multiplexedStream as soon as all streams are done reading from (or cancelled ctx)
-		wg.Wait()
-		close(multiplexedStream)
-	}()
-
-	return multiplexedStream
-}
-
-// WriteOrDone avoids deadlocking by ensuring context will be checked when performing a write
+// WriteOrDone avoids deadlocking by ensuring context will be checked when performing a write.
 func WriteOrDone(ctx context.Context, write PipelineData, to chan<- PipelineData) {
 	select {
 	case <-ctx.Done():
@@ -165,11 +132,6 @@ func OrDone(ctx context.Context, inputStream Stream) Stream {
 	outputStream := make(chan PipelineData)
 	go func() {
 		defer close(outputStream)
-
-		if inputStream == nil {
-			return
-		}
-
 		for {
 			select {
 			case <-ctx.Done(): // exit as soon as the context is done
@@ -189,5 +151,22 @@ func OrDone(ctx context.Context, inputStream Stream) Stream {
 		}
 	}()
 
+	return outputStream
+}
+
+// GenerateFromSlice generates a stream from an inputSlice.
+func GenerateFromSlice(ctx context.Context, inputSlice []Streamable) Stream {
+	outputStream := make(chan PipelineData)
+	go func() {
+		defer close(outputStream)
+
+		for _, v := range inputSlice {
+			data := PipelineData{
+				Value: v,
+			}
+
+			WriteOrDone(ctx, data, outputStream)
+		}
+	}()
 	return outputStream
 }

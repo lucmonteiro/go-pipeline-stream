@@ -199,8 +199,3 @@ builder.WithErrorHandler(t.errorHandlerStep)
 ```
 
 Then, we can Build() the pipeline and Run() it providing a valid context.
-
-# Final thoughts
-
-These examples should be enough to get you going with a Pipeline Stream. </br>
-In the next version we will add heartbeat support, in order to monitor each function to identify misbehaving goroutines.

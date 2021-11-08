@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/mock"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -249,6 +250,46 @@ func TestPipelineBuilder_WithTeardown_WithGracefulErrorHandler(t *testing.T) {
 
 	require.True(t, mockedTeardown.AssertExpectations(t))
 	require.True(t, mockedErr.AssertExpectations(t))
+}
+
+func TestPipelineBuilder_WithTeardown_ErrorIsNotOverwritten(t *testing.T) {
+	builder := streams.NewPipelineBuilder("tests")
+
+	mockedTeardown := &teardownMock{}
+
+	gen := intGenerator{length: 2}
+
+	builder = builder.
+		WithGenerator(gen.generateIntsFunc).
+		WithSteps(generateErrStep).
+		WithTeardownSteps(streams.NewTeardownStep("mock", 1, mockedTeardown.teardownFunc))
+
+	successData := streams.PipelineData{Value: streamableInts{Integer: 1}}
+	mockedTeardown.On("teardownFunc", successData.Value).Return(nil)
+
+	errData := streams.PipelineData{Value: streamableInts{Integer: 2}, Err: streams.PipelineError{
+		Step:     "err",
+		Cause:    errors.New("unexpected"),
+		StepType: "pipeline",
+	}}
+	mockedTeardown.On("teardownFunc", errData.Value).Return(nil)
+
+	p := builder.Build()
+
+	result := p.Run(context.Background())
+
+	for e := range streams.OrDone(context.Background(), result) {
+		if e.Err != nil {
+			require.Equal(t, streams.PipelineError{
+				Step:     "err",
+				Cause:    errors.New("unexpected"),
+				StepType: streams.StepTypePipelineStep,
+			}, e.Err)
+		}
+	}
+
+	require.True(t, mockedTeardown.AssertExpectations(t))
+
 }
 
 func TestPipelineBuilder_WithTeardownError_WithGracefulErrorHandler(t *testing.T) {

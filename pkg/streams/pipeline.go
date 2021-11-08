@@ -110,10 +110,12 @@ func (p pipeline) createTeardownStream(ctx context.Context, step TeardownStep, i
 
 		for input := range OrDone(ctx, inputStream) {
 			if err := step.teardownFunc(ctx, input.Value); err != nil {
-				input.Err = PipelineError{
-					Step:     step.name,
-					Cause:    fmt.Errorf("%w: %s", ErrTeardown, err),
-					StepType: StepTypeTeardownStep,
+				if input.Err == nil {
+					input.Err = PipelineError{
+						Step:     step.name,
+						Cause:    fmt.Errorf("%w: %s", ErrTeardown, err),
+						StepType: StepTypeTeardownStep,
+					}
 				}
 
 				WriteOrDone(ctx, input, outputStream)
